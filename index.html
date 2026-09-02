@@ -867,11 +867,46 @@ async function subirPDFaDrive(blob, filename){
   return res.json();
 }
 
+/* Reutiliza SOLO las reglas de @media print que dicen "no cortes esto por
+   la mitad" (tarjetas, secciones, tablas, footer) — nunca las que tocan el
+   layout general de la página (panel, grid, sidebar) ni el tamaño del
+   propio documento, porque eso corre el contenido de lugar y hace que
+   html2canvas recorte mal la imagen. Sin este filtro, la portada se corta;
+   sin ESTAS reglas, el salto de página corta tarjetas y tablas a la mitad. */
+function cssParaCapturaPDF(){
+  const bloqueadas = ['body', '.app', '.panel', '.noprint', '.stage'];
+  let out = '';
+  for(const sheet of document.styleSheets){
+    let rules;
+    try{ rules = sheet.cssRules; }catch(e){ continue; }
+    if(!rules) continue;
+    for(const rule of rules){
+      if(rule.type === CSSRule.MEDIA_RULE && /print/i.test(rule.conditionText || (rule.media && rule.media.mediaText))){
+        for(const r of rule.cssRules){
+          const sel = (r.selectorText || '').trim();
+          if(!sel) continue;
+          if(sel === '.doc') continue; // no reescalar el ancho del documento capturado
+          if(sel.indexOf('.doc.full') !== -1) continue; // portada completa: no se usa en este export
+          const bloqueada = sel.split(',').some(parte => {
+            const p = parte.trim();
+            return bloqueadas.some(b => p === b || p.startsWith(b + ' ') || p.startsWith(b + '.') || p.startsWith(b + ','));
+          });
+          if(bloqueada) continue;
+          out += r.cssText + '\n';
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /* Para este export puntual (vía html2canvas) no usamos la portada "a hoja
-   completa" ni los saltos de página forzados: ese motor de captura no
-   reproduce esas reglas de forma confiable. Usamos la portada compacta
-   normal, mucho más simple, y dejamos que pagine solo. "Descargar PDF"
-   no se toca — sigue usando el motor de impresión real del navegador. */
+   completa": ese motor de captura no reproduce de forma confiable una
+   altura de página exacta con overflow oculto. Usamos la portada compacta
+   normal, mucho más simple. Sí reutilizamos las reglas de "no cortar esto"
+   (arriba) para que las tarjetas y tablas no queden partidas por un salto
+   de página. "Descargar PDF" no se toca — sigue usando el motor de
+   impresión real del navegador, con la portada completa si la tildaste. */
 function generarPDFBlob(){
   const el = $('doc');
   const claseOriginal = el.className;
@@ -886,8 +921,19 @@ function generarPDFBlob(){
     margin: 0,
     filename: nombreArchivoPDF(),
     image: { type: 'jpeg', quality: 0.95 },
-    html2canvas: { scale: 2, useCORS: true, scrollX: 0, scrollY: 0 },
-    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    html2canvas: {
+      scale: 2,
+      useCORS: true,
+      scrollX: 0,
+      scrollY: 0,
+      onclone: (clonedDoc) => {
+        const style = clonedDoc.createElement('style');
+        style.textContent = cssParaCapturaPDF();
+        clonedDoc.head.appendChild(style);
+      }
+    },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+    pagebreak: { mode: ['css', 'legacy'] }
   }).from(el).outputPdf('blob');
 
   promesa.finally(() => {
