@@ -809,9 +809,12 @@ function nombreArchivoPDF(){
   return 'Lidz Propuesta - ' + cliente + ' - ' + fecha + '.pdf';
 }
 
-/* Reutiliza tal cual las reglas ya definidas en @media print, para que el PDF
-   generado por html2pdf.js respete el mismo diseño que "Descargar PDF". */
-function extraerCSSImpresion(){
+/* Reutiliza SOLO las reglas de @media print que afectan al documento en sí
+   (portada, secciones, tablas, saltos de página) — nunca las que tocan el
+   layout general de la página (panel, grid, sidebar), porque eso corre el
+   documento de lugar y hace que html2canvas recorte mal la imagen. */
+function cssParaCapturaPDF(){
+  const bloqueadas = ['body', '.app', '.panel', '.noprint', '.stage'];
   let out = '';
   for(const sheet of document.styleSheets){
     let rules;
@@ -819,7 +822,17 @@ function extraerCSSImpresion(){
     if(!rules) continue;
     for(const rule of rules){
       if(rule.type === CSSRule.MEDIA_RULE && /print/i.test(rule.conditionText || (rule.media && rule.media.mediaText))){
-        for(const r of rule.cssRules) out += r.cssText + '\n';
+        for(const r of rule.cssRules){
+          const sel = (r.selectorText || '').trim();
+          if(!sel) continue;
+          if(sel === '.doc') continue; // no reescalar el ancho del documento capturado
+          const bloqueada = sel.split(',').some(parte => {
+            const p = parte.trim();
+            return bloqueadas.some(b => p === b || p.startsWith(b + ' ') || p.startsWith(b + '.') || p.startsWith(b + ','));
+          });
+          if(bloqueada) continue;
+          out += r.cssText + '\n';
+        }
       }
     }
   }
@@ -886,22 +899,32 @@ async function subirPDFaDrive(blob, filename){
 
 function generarPDFBlob(){
   const el = $('doc');
-  return html2pdf().set({
+  const stage = document.querySelector('.stage');
+  const scrollPrevio = stage ? stage.scrollTop : 0;
+  if(stage) stage.scrollTop = 0; // si quedó scrolleada la vista previa, html2canvas recorta mal
+  window.scrollTo(0, 0);
+  const promesa = html2pdf().set({
     margin: 0,
     filename: nombreArchivoPDF(),
     image: { type: 'jpeg', quality: 0.95 },
     html2canvas: {
       scale: 2,
       useCORS: true,
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: document.documentElement.scrollWidth,
+      windowHeight: document.documentElement.scrollHeight,
       onclone: (clonedDoc) => {
         const style = clonedDoc.createElement('style');
-        style.textContent = extraerCSSImpresion();
+        style.textContent = cssParaCapturaPDF();
         clonedDoc.head.appendChild(style);
       }
     },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
     pagebreak: { mode: ['css', 'legacy'] }
   }).from(el).outputPdf('blob');
+  promesa.finally(() => { if(stage) stage.scrollTop = scrollPrevio; });
+  return promesa;
 }
 
 if($('drivebtn')){
