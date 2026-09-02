@@ -928,7 +928,15 @@ function generarPDFBlob(){
       scrollY: 0,
       onclone: (clonedDoc) => {
         const style = clonedDoc.createElement('style');
-        style.textContent = cssParaCapturaPDF();
+        // Además de "no cortar tarjetas/tablas", forzamos que cada
+        // sección grande (Qué incluye, Inversión, Condiciones, etc.)
+        // arranque siempre en una hoja nueva. break-inside:avoid no
+        // alcanza cuando la sección no entra en lo que queda de página:
+        // esta librería la corta igual. Arrancando siempre en limpio,
+        // nunca hay nada que cortar.
+        style.textContent = cssParaCapturaPDF() +
+          '\n.page > .sec{break-before:page;page-break-before:always}' +
+          '\n.page > .sec:first-of-type{break-before:auto;page-break-before:auto}';
         clonedDoc.head.appendChild(style);
       }
     },
