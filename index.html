@@ -8,7 +8,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;600;900&family=Roboto+Condensed:wght@400;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" integrity="sha512-GsLlZN/3F2ErC5ifS5QtgpiJtWd43JWSuIgh7mbzZ8zBps+dvLusV+eNQATqgA/HdeKFVgA5v3S/cIrLF7QnIg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
 :root{
   --azul-oscuro:#0C0A3B; --azul-vivido:#3C3AF7; --turquesa:#7AF4E6; --celeste:#E0EDF6;
@@ -329,11 +328,12 @@ ul.plain li{font-size:13.6px;line-height:1.62;color:#3a3f5c;margin-bottom:7px}
 
   <div class="btns">
     <button class="btn turq" onclick="window.print()">Descargar PDF</button>
-    <button class="btn ghost" id="drivebtn">Guardar en Drive</button>
+    <button class="btn ghost" id="drivebtn">Subir PDF a Drive</button>
     <div id="drivestatus" class="hint" style="text-align:center;margin:-3px 0 0"></div>
     <button class="btn ghost" id="exportar">Guardar configuración</button>
     <button class="btn ghost" id="importar">Cargar configuración</button>
     <input type="file" id="fileinput" accept="application/json" style="display:none">
+    <input type="file" id="driveinput" accept="application/pdf" style="display:none">
   </div>
 </aside>
 
@@ -797,17 +797,10 @@ $('fileinput').addEventListener('change', e => {
 })();
 
 /* ===== Guardado en Google Drive =====
-   Genera el PDF adentro del navegador (sin pasar por el diálogo de impresión)
-   y lo sube directo a la carpeta de Drive configurada en DRIVE_CONFIG, arriba.
-   Requiere que este archivo esté servido desde una URL real (ver DRIVE_SETUP
-   al final de este archivo, en comentario). */
-
-function nombreArchivoPDF(){
-  const s = state();
-  const cliente = (s.cliente || 'Cliente').trim();
-  const fecha = s.fecha || new Date().toISOString().slice(0,10);
-  return 'Lidz Propuesta - ' + cliente + ' - ' + fecha + '.pdf';
-}
+   Subís directo el mismo PDF que generaste con "Descargar PDF" — no se
+   recrea nada con otra librería, así que sale exactamente igual, sin
+   riesgo de cortes. Requiere que este archivo esté servido desde una URL
+   real (ver DRIVE_SETUP al final de este archivo, en comentario). */
 
 let gisClient = null, gisToken = null;
 function pedirTokenDrive(){
@@ -867,110 +860,32 @@ async function subirPDFaDrive(blob, filename){
   return res.json();
 }
 
-/* Reutiliza SOLO las reglas de @media print que dicen "no cortes esto por
-   la mitad" (tarjetas, secciones, tablas, footer) — nunca las que tocan el
-   layout general de la página (panel, grid, sidebar) ni el tamaño del
-   propio documento, porque eso corre el contenido de lugar y hace que
-   html2canvas recorte mal la imagen. Sin este filtro, la portada se corta;
-   sin ESTAS reglas, el salto de página corta tarjetas y tablas a la mitad. */
-function cssParaCapturaPDF(){
-  const bloqueadas = ['body', '.app', '.panel', '.noprint', '.stage'];
-  let out = '';
-  for(const sheet of document.styleSheets){
-    let rules;
-    try{ rules = sheet.cssRules; }catch(e){ continue; }
-    if(!rules) continue;
-    for(const rule of rules){
-      if(rule.type === CSSRule.MEDIA_RULE && /print/i.test(rule.conditionText || (rule.media && rule.media.mediaText))){
-        for(const r of rule.cssRules){
-          const sel = (r.selectorText || '').trim();
-          if(!sel) continue;
-          if(sel === '.doc') continue; // no reescalar el ancho del documento capturado
-          if(sel.indexOf('.doc.full') !== -1) continue; // portada completa: no se usa en este export
-          const bloqueada = sel.split(',').some(parte => {
-            const p = parte.trim();
-            return bloqueadas.some(b => p === b || p.startsWith(b + ' ') || p.startsWith(b + '.') || p.startsWith(b + ','));
-          });
-          if(bloqueada) continue;
-          out += r.cssText + '\n';
-        }
-      }
-    }
-  }
-  return out;
-}
-
-/* Para este export puntual (vía html2canvas) no usamos la portada "a hoja
-   completa": ese motor de captura no reproduce de forma confiable una
-   altura de página exacta con overflow oculto. Usamos la portada compacta
-   normal, mucho más simple. Sí reutilizamos las reglas de "no cortar esto"
-   (arriba) para que las tarjetas y tablas no queden partidas por un salto
-   de página. "Descargar PDF" no se toca — sigue usando el motor de
-   impresión real del navegador, con la portada completa si la tildaste. */
-function generarPDFBlob(){
-  const el = $('doc');
-  const claseOriginal = el.className;
-  el.className = el.className.replace(/\bfull\b/, '').trim();
-
-  const stage = document.querySelector('.stage');
-  const scrollPrevio = stage ? stage.scrollTop : 0;
-  if(stage) stage.scrollTop = 0;
-  window.scrollTo(0, 0);
-
-  const promesa = html2pdf().set({
-    margin: 0,
-    filename: nombreArchivoPDF(),
-    image: { type: 'jpeg', quality: 0.95 },
-    html2canvas: {
-      scale: 2,
-      useCORS: true,
-      scrollX: 0,
-      scrollY: 0,
-      onclone: (clonedDoc) => {
-        const style = clonedDoc.createElement('style');
-        // Además de "no cortar tarjetas/tablas", forzamos que cada
-        // sección grande (Qué incluye, Inversión, Condiciones, etc.)
-        // arranque siempre en una hoja nueva. break-inside:avoid no
-        // alcanza cuando la sección no entra en lo que queda de página:
-        // esta librería la corta igual. Arrancando siempre en limpio,
-        // nunca hay nada que cortar.
-        style.textContent = cssParaCapturaPDF() +
-          '\n.page > .sec{break-before:page;page-break-before:always}' +
-          '\n.page > .sec:first-of-type{break-before:auto;page-break-before:auto}';
-        clonedDoc.head.appendChild(style);
-      }
-    },
-    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-    pagebreak: { mode: ['css', 'legacy'] }
-  }).from(el).outputPdf('blob');
-
-  promesa.finally(() => {
-    el.className = claseOriginal;
-    if(stage) stage.scrollTop = scrollPrevio;
-  });
-  return promesa;
-}
-
 if($('drivebtn')){
-  $('drivebtn').addEventListener('click', async () => {
-    const btn = $('drivebtn');
-    const status = $('drivestatus');
+  $('drivebtn').addEventListener('click', () => {
     if(DRIVE_CONFIG.clientId.startsWith('PEGAR_') || DRIVE_CONFIG.folderId.startsWith('PEGAR_')){
-      status.textContent = 'Falta configurar DRIVE_CONFIG en el archivo (ver instrucciones al pie del HTML).';
+      $('drivestatus').textContent = 'Falta configurar DRIVE_CONFIG en el archivo (ver instrucciones al pie del HTML).';
       return;
     }
+    $('driveinput').click();
+  });
+}
+if($('driveinput')){
+  $('driveinput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if(!file) return;
+    const btn = $('drivebtn');
+    const status = $('drivestatus');
     btn.disabled = true;
-    status.textContent = 'Generando PDF...';
+    status.textContent = 'Subiendo a Drive...';
     try{
-      const blob = await generarPDFBlob();
-      status.textContent = 'Subiendo a Drive...';
-      await subirPDFaDrive(blob, nombreArchivoPDF());
+      await subirPDFaDrive(file, file.name);
       status.textContent = 'Guardado en Drive ✓';
     }catch(err){
       console.error(err);
       status.textContent = 'Error al subir: ' + (err && err.message ? err.message : 'revisá la consola');
     }finally{
       btn.disabled = false;
+      e.target.value = '';
       setTimeout(() => { if(status.textContent.indexOf('Guardado') === 0) status.textContent = ''; }, 4000);
     }
   });
@@ -978,3 +893,62 @@ if($('drivebtn')){
 </script>
 </body>
 </html>
+</body>
+</html>
+<!--
+==================== DRIVE_SETUP — instrucciones (no afecta el funcionamiento) ====================
+
+Para que "Guardar en Drive" funcione, este archivo tiene que vivir en una URL real
+(no abierto como archivo local), porque Google exige un origen http/https para el login.
+Usamos GitHub Pages, que es gratis. Pasos:
+
+1) SUBIR EL ARCHIVO A GITHUB
+   - Creá un repositorio nuevo en GitHub (público o privado, cualquiera sirve para Pages).
+   - Subí este archivo con el nombre index.html (podés arrastrarlo desde la web de GitHub,
+     o por terminal:
+       git init
+       git add Configurador_de_propuestas_LIDZ_5.html
+       git mv Configurador_de_propuestas_LIDZ_5.html index.html
+       git commit -m "Configurador LIDZ"
+       git branch -M main
+       git remote add origin https://github.com/TU_USUARIO/TU_REPO.git
+       git push -u origin main
+   - En GitHub: Settings → Pages → Source: "Deploy from a branch" → Branch: main → /(root) → Save.
+   - Anotá la URL que te da (algo como https://tu-usuario.github.io/tu-repo/).
+
+2) CREAR EL CLIENT ID EN GOOGLE CLOUD
+   - Entrá a https://console.cloud.google.com/ y creá un proyecto (o usá uno existente).
+   - Activá la "Google Drive API": menú → APIs & Services → Library → buscar "Google Drive API" → Enable.
+   - Andá a APIs & Services → Credentials → Create Credentials → OAuth client ID.
+     - Si te pide configurar la "OAuth consent screen" primero, hacelo:
+       tipo "External", nombre de la app (ej. "Configurador LIDZ"), tu email de soporte,
+       y en "Test users" agregá los emails de Google que van a usar el botón (mientras
+       la app esté en modo prueba, solo esos emails van a poder loguearse).
+     - Tipo de aplicación: "Web application".
+     - En "Authorized JavaScript origins" agregá la URL de GitHub Pages del paso 1
+       (sin barra al final), ej: https://tu-usuario.github.io
+   - Copiá el "Client ID" que te genera (termina en .apps.googleusercontent.com).
+
+3) CONFIGURAR ESTE ARCHIVO
+   - Buscá, cerca del principio del <script>, la constante DRIVE_CONFIG y pegá:
+       clientId: el Client ID del paso 2
+       folderId: el ID de la carpeta de Drive donde querés guardar los PDF
+         (se lo saca de la URL de la carpeta: .../folders/ESTE_ES_EL_ID)
+   - Volvé a subir el archivo actualizado a GitHub (commit + push).
+
+4) PROBAR
+   - Abrí la URL de GitHub Pages, armá una propuesta y apretá "Descargar PDF"
+     (se descarga a tu carpeta de Descargas, como siempre).
+   - Apretá "Subir PDF a Drive", elegí ese mismo archivo que acabás de descargar,
+     y se sube a la carpeta configurada. Es el mismo PDF, sin recrear nada.
+   - La primera vez te va a pedir loguearte con Google y dar permiso — el permiso pedido
+     es "drive.file", que solo le da acceso a los archivos que esta herramienta suba,
+     no a tu Drive entero.
+   - Si algo falla, abrí la consola del navegador (F12) para ver el detalle del error;
+     los mensajes de "status" en el panel también dan una pista.
+
+Nota: "Descargar PDF" (window.print) no depende de nada de esto y sigue funcionando igual,
+en cualquier lado, incluso abriendo el archivo local.
+====================================================================================
+-->
+
