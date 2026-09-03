@@ -7,6 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;600;900&family=Roboto+Condensed:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" integrity="sha512-GsLlZN/3F2ErC5ifS5QtgpiJtWd43JWSuIgh7mbzZ8zBps+dvLusV+eNQATqgA/HdeKFVgA5v3S/cIrLF7QnIg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
 :root{
   --azul-oscuro:#0C0A3B; --azul-vivido:#3C3AF7; --turquesa:#7AF4E6; --celeste:#E0EDF6;
@@ -786,12 +788,18 @@ $('fileinput').addEventListener('change', e => {
 })();
 
 /* ===== Guardado en Google Drive =====
-   Manda el HTML completo de la propuesta a una función propia (alojada en
-   Vercel), que abre un Chrome real, genera el PDF (igual que "Descargar
-   PDF") y lo sube a la carpeta de Drive con una cuenta de servicio — todo
-   en un clic, sin login de Google en el navegador. */
+   Genera el PDF adentro del navegador y lo sube directo a Drive, sin
+   servidor. Para que no corte nada, arma el PDF SECCIÓN POR SECCIÓN a
+   mano: cada sección (Situación, Qué incluye, Inversión, etc) se
+   convierte en su propia imagen y ocupa su propia hoja — o se reparte en
+   varias limpiamente si es más alta que una hoja. Así nunca queda una
+   tarjeta o un renglón cortado a la mitad, porque nosotros decidimos
+   dónde empieza cada hoja, no lo adivina la librería. */
 
-const PDF_SERVICE_URL = 'https://lidz-pdf-service.vercel.app/api/generate-pdf';
+const DRIVE_CONFIG = {
+  clientId: '67041589338-ihv2b821ubhavh8liq5mugqjelhimrak.apps.googleusercontent.com',
+  folderId: '17l0fgQKNEUI5nTfhYAdiB2zATOXCfnXI'
+};
 
 function nombreArchivoPDF(){
   const s = state();
@@ -800,25 +808,142 @@ function nombreArchivoPDF(){
   return 'Lidz Propuesta - ' + cliente + ' - ' + fecha + '.pdf';
 }
 
+let gisClient = null, gisToken = null;
+function pedirTokenDrive(){
+  return new Promise((resolve, reject) => {
+    if(!window.google || !google.accounts || !google.accounts.oauth2){
+      reject(new Error('No cargó la librería de Google (revisá tu conexión).'));
+      return;
+    }
+    if(!gisClient){
+      gisClient = google.accounts.oauth2.initTokenClient({
+        client_id: DRIVE_CONFIG.clientId,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: () => {}
+      });
+    }
+    gisClient.callback = (resp) => {
+      if(resp.error){ reject(resp); return; }
+      gisToken = resp.access_token;
+      resolve(gisToken);
+    };
+    gisClient.requestAccessToken({ prompt: gisToken ? '' : 'consent' });
+  });
+}
+
+function blobABase64(blob){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function subirPDFaDrive(blob, filename){
+  const token = await pedirTokenDrive();
+  const metadata = { name: filename, parents: [DRIVE_CONFIG.folderId], mimeType: 'application/pdf' };
+  const boundary = 'lidzpropuesta' + Date.now();
+  const base64Data = await blobABase64(blob);
+  const body =
+    '--' + boundary + '\r\n' +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) + '\r\n' +
+    '--' + boundary + '\r\n' +
+    'Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n' + base64Data + '\r\n' +
+    '--' + boundary + '--';
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Content-Type': 'multipart/related; boundary="' + boundary + '"'
+    },
+    body
+  });
+  if(!res.ok){
+    const texto = await res.text().catch(() => '');
+    throw new Error('Drive respondió ' + res.status + ': ' + texto);
+  }
+  return res.json();
+}
+
+/* Corta un canvas alto en una tira de a lo sumo `altoHojaPx` píxeles,
+   empezando en `offsetPx`, y la devuelve como canvas nuevo. */
+function recortarCanvas(canvas, offsetPx, altoPx){
+  const recorte = document.createElement('canvas');
+  recorte.width = canvas.width;
+  recorte.height = altoPx;
+  recorte.getContext('2d').drawImage(canvas, 0, offsetPx, canvas.width, altoPx, 0, 0, canvas.width, altoPx);
+  return recorte;
+}
+
+async function generarPDFBlob(){
+  const el = $('doc');
+  const claseOriginal = el.className;
+  el.className = el.className.replace(/\bfull\b/, '').trim(); // portada compacta: más confiable acá
+
+  const stage = document.querySelector('.stage');
+  const scrollPrevio = stage ? stage.scrollTop : 0;
+  if(stage) stage.scrollTop = 0;
+  window.scrollTo(0, 0);
+
+  try{
+    const html2canvasFn = window.html2canvas;
+    const JsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+    if(!html2canvasFn || !JsPDFCtor) throw new Error('No cargó la librería de generación de PDF.');
+
+    const bloques = [];
+    const cover = el.querySelector('.cover');
+    if(cover) bloques.push(cover);
+    el.querySelectorAll('.page > .sec').forEach(s => bloques.push(s));
+    const footer = el.querySelector('.footer');
+    if(footer) bloques.push(footer);
+
+    const pageWidthMM = 210, pageHeightMM = 297;
+    const pdf = new JsPDFCtor({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    let primeraHoja = true;
+
+    for(const bloque of bloques){
+      const canvas = await html2canvasFn(bloque, { scale: 2, useCORS: true, scrollX: 0, scrollY: 0 });
+      const imgWidthMM = pageWidthMM;
+      const imgHeightMM = (canvas.height * imgWidthMM) / canvas.width;
+      const pxPerMM = canvas.height / imgHeightMM;
+
+      if(imgHeightMM <= pageHeightMM){
+        if(!primeraHoja) pdf.addPage();
+        primeraHoja = false;
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, imgWidthMM, imgHeightMM);
+      }else{
+        // El bloque es más alto que una hoja: se reparte en varias, en cortes limpios de píxeles.
+        let offsetPx = 0;
+        const altoHojaPx = pageHeightMM * pxPerMM;
+        while(offsetPx < canvas.height){
+          const altoRestantePx = Math.min(altoHojaPx, canvas.height - offsetPx);
+          const recorte = recortarCanvas(canvas, offsetPx, altoRestantePx);
+          if(!primeraHoja) pdf.addPage();
+          primeraHoja = false;
+          pdf.addImage(recorte.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, imgWidthMM, altoRestantePx / pxPerMM);
+          offsetPx += altoHojaPx;
+        }
+      }
+    }
+
+    return pdf.output('blob');
+  }finally{
+    el.className = claseOriginal;
+    if(stage) stage.scrollTop = scrollPrevio;
+  }
+}
+
 if($('drivebtn')){
   $('drivebtn').addEventListener('click', async () => {
     const btn = $('drivebtn');
     const status = $('drivestatus');
     btn.disabled = true;
-    status.textContent = 'Generando y subiendo a Drive...';
+    status.textContent = 'Generando PDF...';
     try{
-      const res = await fetch(PDF_SERVICE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          html: document.documentElement.outerHTML,
-          filename: nombreArchivoPDF()
-        })
-      });
-      if(!res.ok){
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || ('El servidor respondió ' + res.status));
-      }
+      const blob = await generarPDFBlob();
+      status.textContent = 'Subiendo a Drive...';
+      await subirPDFaDrive(blob, nombreArchivoPDF());
       status.textContent = 'Guardado en Drive ✓';
     }catch(err){
       console.error(err);
@@ -835,26 +960,23 @@ if($('drivebtn')){
 <!--
 ==================== NOTAS — arquitectura de "Guardar en Drive" (no afecta el funcionamiento) ====================
 
-Este configurador manda el HTML completo de la propuesta a una función propia
-alojada en Vercel (repo lidz-pdf-service, ver PDF_SERVICE_URL más arriba en
-el <script>). Esa función:
-  1) Abre un Chrome real (Puppeteer) y genera el PDF con el mismo motor
-     que usa "Descargar PDF" — por eso sale siempre igual, sin cortes.
-  2) Lo sube directo a la carpeta de Drive configurada, usando una cuenta
-     de servicio de Google (sin que nadie tenga que loguearse).
+"Guardar en Drive" genera el PDF adentro del navegador (con html2canvas +
+jsPDF, sección por sección, para que ninguna tarjeta o tabla quede cortada
+a la mitad) y lo sube directo a la carpeta de Drive configurada en
+DRIVE_CONFIG, arriba en el <script>, usando tu propia sesión de Google
+(pide permiso "drive.file" la primera vez — solo le da acceso a los
+archivos que esta herramienta suba, no a tu Drive entero).
 
-Si en algún momento hay que mover el servicio a otra URL (por ejemplo si se
-recrea el proyecto en Vercel), solo hay que actualizar la constante
-PDF_SERVICE_URL en este archivo con la nueva URL, terminada en
-/api/generate-pdf.
-
-Las credenciales (cuenta de servicio de Google, ID de la carpeta de Drive)
-viven como variables de entorno en el proyecto de Vercel
-(GOOGLE_SERVICE_ACCOUNT_JSON y GOOGLE_DRIVE_FOLDER_ID) — nunca en este
-archivo, para no exponerlas en un repo público.
+Para que el login de Google funcione, este archivo tiene que estar
+alojado en una URL real (no abierto como archivo local) — por eso vive en
+GitHub Pages. El Client ID de DRIVE_CONFIG tiene que tener esa URL
+cargada como "Authorized JavaScript origin" en Google Cloud Console
+(APIs & Services → Credentials).
 
 Nota: "Descargar PDF" (window.print) no depende de nada de esto y sigue
-funcionando igual, en cualquier lado, incluso abriendo el archivo local.
+funcionando igual, en cualquier lado, incluso abriendo el archivo local —
+y sigue siendo la opción con mejor fidelidad si alguna vez el PDF de
+Drive no queda perfecto.
 ====================================================================================
 -->
 
